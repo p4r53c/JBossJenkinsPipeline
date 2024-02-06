@@ -1,0 +1,774 @@
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
+
+import static groovy.io.FileType.*
+
+import groovy.json.JsonSlurperClassic;
+import groovy.json.JsonOutput;
+
+import groovy.lang.Closure
+
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.client.methods.HttpPut;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.HttpResponse;
+import org.apache.http.HttpHeaders;
+import org.apache.http.impl.auth.DigestScheme;
+import org.apache.http.impl.client.BasicAuthCache;
+import org.apache.http.impl.client.BasicCredentialsProvider;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.client.HttpClient;
+import org.apache.http.impl.client.HttpClientBuilder;
+import org.apache.http.auth.UsernamePasswordCredentials;
+import org.apache.http.client.config.RequestConfig;
+import org.apache.http.util.EntityUtils;
+import org.apache.http.entity.StringEntity;
+import org.apache.http.entity.mime.MultipartEntityBuilder;
+import org.apache.http.entity.ContentType;
+import org.apache.http.client.entity.UrlEncodedFormEntity;
+import org.apache.http.message.BasicNameValuePair;
+import org.apache.http.NameValuePair;
+
+/**
+
+ * @author p4r53c
+ * @version 3.1.0
+ * @date 19.06.23
+ * 
+ * 
+ */
+ 
+static final String PIPELINE_VERSION = "3.1.1"; 
+
+//Init
+static final String CONTROLLER_PORT = "9990";
+static final String CONTROLLER_ADDRESS_TEST = "CONTROLLER_ADDRESS_TEST";
+static final String CONTROLLER_ADDRESS_STAGE = "CONTROLLER_ADDRESS_STAGE";
+static final String CONTROLLER_ADDRESS_PROD = "CONTROLLER_ADDRESS_PROD";
+
+static final String KILL_SERVERS_OPERATION = "kill-servers";
+static final String START_SERVERS_OPERATION = "start-servers";
+
+static final String GITLAB_URL = "https://GITLAB_URL/api/v4"
+static final String GITLAB_PROJECT_ID = "3877"
+
+
+switch(env.rnipTargetEnvironment) {
+    case "TEST":
+        env.domainControllerAddress = new StringBuilder().append(CONTROLLER_ADDRESS_TEST).append(':').append(CONTROLLER_PORT);
+        env.jbossCredentials = "RNIP_TEST"
+        env.jbossServerGroupName = "JBOSS_SERVER_GROUP"
+        env.jbossServerUrl = "http://${env.domainControllerAddress}/management";
+        env.infoMessage = "Starting PIPELINE on [${env.rnipTargetEnvironment}] at [${env.domainControllerAddress}]";
+        env.bpUpdaterOCPUrl = "http://dlmUpdaterOCPUrl/";
+        env.dlmUpdaterOCPUrl = "http://dlmUpdaterOCPUrl/";
+        break;
+    case "STAGE":
+        env.domainControllerAddress = new StringBuilder().append(CONTROLLER_ADDRESS_STAGE).append(':').append(CONTROLLER_PORT);
+        env.jbossCredentials = "RNIP_STAGE"
+        env.jbossServerGroupName = "JBOSS_SERVER_GROUP"
+        env.jbossServerUrl = "http://${env.domainControllerAddress}/management";
+        env.infoMessage = "Starting PIPELINE on [${env.rnipTargetEnvironment}] at [${env.domainControllerAddress}]";
+        env.bpUpdaterOCPUrl = "http://dlmUpdaterOCPUrl/";
+        env.dlmUpdaterOCPUrl = "http://dlmUpdaterOCPUrl/";
+        break;
+    case "PROD":
+        env.domainControllerAddress = new StringBuilder().append(CONTROLLER_ADDRESS_PROD).append(':').append(CONTROLLER_PORT);
+        env.jbossCredentials = "RNIP_PROD"
+        env.jbossServerGroupName = "JBOSS_SERVER_GROUP"
+        env.jbossServerUrl = "http://${env.domainControllerAddress}/management";
+        env.infoMessage = "Starting PIPELINE on [${env.rnipTargetEnvironment}] at [${env.domainControllerAddress}]";
+        env.bpUpdaterOCPUrl = "http://dlmUpdaterOCPUrl/";
+        env.dlmUpdaterOCPUrl = "http://dlmUpdaterOCPUrl/";
+        break;
+}
+
+//Secrets
+static final String JBOSS_USERNAME = com.cloudbees.plugins.credentials.SystemCredentialsProvider.getInstance()
+    .getStore()
+    .getCredentials(com.cloudbees.plugins.credentials.domains.Domain.global()).find { 
+        it.getId().equals(env.jbossCredentials) 
+    }.getUsername();
+
+static final String JBOSS_PASSWORD = com.cloudbees.plugins.credentials.SystemCredentialsProvider.getInstance()
+    .getStore()
+    .getCredentials(com.cloudbees.plugins.credentials.domains.Domain.global()).find { 
+        it.getId().equals(env.jbossCredentials) 
+    }.getPassword();
+    
+static final String NEXUS_USERNAME = com.cloudbees.plugins.credentials.SystemCredentialsProvider.getInstance()
+    .getStore()
+    .getCredentials(com.cloudbees.plugins.credentials.domains.Domain.global()).find { 
+        it.getId().equals("RnipNexus") 
+    }.getUsername();
+
+static final String NEXUS_PASSWORD = com.cloudbees.plugins.credentials.SystemCredentialsProvider.getInstance()
+    .getStore()
+    .getCredentials(com.cloudbees.plugins.credentials.domains.Domain.global()).find { 
+        it.getId().equals("RnipNexus") 
+    }.getPassword();
+    
+static final String TELEGRAM_TOKEN = com.cloudbees.plugins.credentials.SystemCredentialsProvider.getInstance()
+    .getStore()
+    .getCredentials(com.cloudbees.plugins.credentials.domains.Domain.global()).find { 
+        it.getId().equals("TELEGRAM_TOKEN") 
+    }.getSecret();
+    
+static final String TELEGRAM_CHAT_ID = com.cloudbees.plugins.credentials.SystemCredentialsProvider.getInstance()
+    .getStore()
+    .getCredentials(com.cloudbees.plugins.credentials.domains.Domain.global()).find { 
+        it.getId().equals("TELEGRAM_CHAT_ID") 
+    }.getSecret();
+
+static final String GITLAB_TOKEN = com.cloudbees.plugins.credentials.SystemCredentialsProvider.getInstance()
+    .getStore()
+    .getCredentials(com.cloudbees.plugins.credentials.domains.Domain.global()).find { 
+        it.getId().equals("GITLAB_TOKEN")
+    }.getSecret();
+
+//Trlrgram Client
+def sendTelegramMessage(String message, String apiToken, String chatId) {
+    HttpClient client = HttpClientBuilder.create().build()
+
+    def request = new HttpPost("https://apitelegram/bot${apiToken}/sendMessage")
+    request.addHeader("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
+    def params = new ArrayList<NameValuePair>()
+    params.add(new BasicNameValuePair("chat_id", chatId))
+    params.add(new BasicNameValuePair("parse_mode", "html"))
+    params.add(new BasicNameValuePair("disable_web_page_preview", "true"))
+    params.add(new BasicNameValuePair("text", message))
+    request.setEntity(new UrlEncodedFormEntity(params))
+    
+    HttpResponse response = null;
+    try {
+        response = client.execute(request);
+    } catch(Exception ex) {
+        throw new Exception("Couldn't send message to telegram! " + ex.getMessage());
+    }
+    
+    int statusCode = response.getStatusLine().getStatusCode();
+    
+    if (statusCode != 200) {
+        String reasonPhrase = response.getStatusLine().getReasonPhrase();
+        String responseBody = response.getEntity().getContent().getText();
+        println("Response status code: ${statusCode}. Reason phrase: ${reasonPhrase}. Body: ${responseBody}");
+    }
+    
+    post = null;
+}
+
+def buildTelegramMessage(Boolean isOk, String pipeVersion, String stageName, String message) {
+    def state = null;
+    
+    switch(isOk) {
+        case true:
+            state = "OK!"
+            break;
+        case false:
+            state = "FAILURE!";
+            break;
+    }
+
+    return outputMessage = """
+        <b>State: </b><code>${state}</code>
+        <b>Stage: </b><code>${stageName}</code>
+        <b>Pipeline name: </b><code>${env.JOB_BASE_NAME}</code>
+        <b>Pipeline version: </b><code>${pipeVersion}</code>
+        <b>Environment: </b><code>${env.rnipTargetEnvironment}</code>
+        <b>Address: </b><code>${env.domainControllerAddress}</code>
+        <b>Build Version: </b><code>${params.targetBuildVersion}</code>\n
+        <b>Message: </b><i>${message}</i>\n
+        <b>Job link: </b>${env.BUILD_URL}
+    """
+}
+
+//Exceptor
+def throwException(String pipelineState, String errorMessage) {
+    currentBuild.result = pipelineState;
+    throw new Exception(errorMessage);
+}
+
+def echoLogger(def ... messages) {
+   return """
+    ===================================================================
+
+       ${loggerMessagesMapper(null, messages).join("\n         -> ")}
+
+   """
+}
+
+def loggerMessagesMapper(def list, def messages) {
+    
+   list = list ?: []
+   
+   if (!(messages instanceof String) && !(messages instanceof GString)) {
+       messages.each { msg ->
+           list = loggerMessagesMapper(list, msg);
+       }
+   }
+   else {
+       list += messages;
+   }
+
+   return list;
+}
+
+def getClusterMagagementRequest(String serverGroupName, String operation) {
+    return """
+    {
+        "address": [
+            {
+                "server-group": "${serverGroupName}"
+            }
+        ],
+        "operation": "${operation}",
+        "blocking": true,
+        "json.pretty": 1
+    }
+    """
+}
+
+//JBoss requests
+def getCurrentDeploymentResources(String serverGroupName) {
+    return """
+    {
+        "operation": "read-children-resources",
+        "child-type": "deployment",
+        "include-runtime": true,
+        "recursive": true,
+        "address": [
+            "${serverGroupName}"
+        ],
+        "json.pretty": 1
+    }
+    """
+}
+
+def getUndeployRequest(String serverGroupName, String deployment) {
+    return """
+    {
+        "operation": "remove",
+        "address": {
+            "server-group": "${serverGroupName}",
+            "deployment": "${deployment}"
+        },
+        "json.pretty": 1
+    }
+    """
+}
+
+def getRemoveRequest(String deployment) {
+    return """
+    {
+        "operation": "remove",
+        "address": {
+            "deployment": "${deployment}"
+        },
+        "json.pretty": 1
+    }
+    """
+}
+
+def getGlobalyAddByHashRequest(String deployment, String byteStringHash) {
+    return """
+        {
+            "content": [
+                {
+                    "hash": {
+                        "BYTES_VALUE": "${byteStringHash}"
+                    }
+                }
+            ],
+            "address": [
+                {
+                    "deployment": "${deployment}"
+                }
+            ],
+            "operation": "add"
+        }
+    """
+}
+
+def getServerGroupAssignationRequest(String serverGroupName, String deployment) {
+    return """
+        {
+            "address": [
+                {
+                    "server-group": "${serverGroupName}"
+                },
+                {
+                    "deployment": "${deployment}"
+                }
+            ],
+            "operation": "add",
+            "enabled": "true"
+        }
+    """
+}
+
+//Gitlab
+def getBPMap() {
+    def data = [
+        "CHECK_CATALOG", "catalog/catalog-service-war/src/test/resources/bp/", "bp-check-domain-catalog.xml",
+        "CHECK_IMPORT_CATALOG", "catalog/catalog-service-war/src/test/resources/bp/", "bp-check-import-catalog-request.xml",
+        "CNSI_PROCESS_REGISTRY_OFFICE_RECORDS", "cnsi/cnsi-service/src/test/resources/bp/", "bp-process-registry-office-records.xml",
+        "CHECK_CHARGE", "unifo/doc-transfer-service-war/src/test/resources/bp/", "bp-check-domain-charge.xml",
+        "CHECK_PAYMENT", "unifo/doc-transfer-service-war/src/test/resources/bp/", "bp-check-domain-payment.xml",
+        "CHECK_IMPORT_CHARGE", "unifo/doc-transfer-service-war/src/test/resources/bp/", "bp-check-import-charge-request.xml",
+        "CHECK_IMPORT_PAYMENT", "unifo/doc-transfer-service-war/src/test/resources/bp/", "bp-check-import-payment-request.xml",
+        "MANAGE_SUBSCRIPTION_CHECK", "unifo/unifo-subscription-service/war/src/test/resources/bp/", "bp-check-manage-subscription.xml",
+        "RECONCILE_CHARGE", "unifo/unifo-reconcile-service-jar/src/test/resources/bp/", "bp-reconcile-charge.xml",
+        "RECONCILE_PAYMENT", "unifo/unifo-reconcile-service-jar/src/test/resources/bp/", "bp-reconcile-payment.xml",
+        "CONVERT_CHARGE_TO_CHANGE", "smev3-ext/smev3-ext-adapter-jar/src/test/resources/bp/", "bp-convert-charge-to-change.xml",
+        "CONVERT_PAYMENT_TO_CHANGE", "smev3-ext/smev3-ext-adapter-jar/src/test/resources/bp/", "bp-convert-payment-to-change.xml",
+        "CONVERT_REFUND_TO_CHANGE", "smev3-ext/smev3-ext-adapter-jar/src/test/resources/bp/", "bp-convert-refund-to-change.xml"
+    ]
+    
+    def businessProcessMap = [:]
+    for (int i = 0; i < data.size(); i += 3) {
+        businessProcessMap[data[i]] = [path: data[i + 1], file: data[i + 2]]
+    }
+    
+    return businessProcessMap
+}
+
+def getDLMMap() {
+    def data = [
+        "CNSI_MESSAGE", "cnsi/cnsi-service/src/test/resources/dlm/", "dlm-cnsi-message.xml",
+        "EXT_SMEV_CNSI_MESSAGE", "smev3-ext/smev3-ext-quartz-delivery-service-war/src/test/resources/dlm/", "dlm-smev3-ext-cnsi-message.xml",
+        "EXT_SMEV_OUTGOING_MESSAGE", "smev3-ext/smev3-ext-quartz-delivery-service-war/src/test/resources/dlm/", "dlm-smev3-ext-message.xml",
+        "EXT_SMEV_REQUEST_MESSAGE", "smev3-ext/smev3-ext-quartz-delivery-service-war/src/test/resources/dlm/", "dlm-smev3-ext-request-message.xml",
+        "SMEV_INCOMING_MESSAGE", "smev3/frontend-service-template/src/test/resources/dlm/", "dlm-smev-incoming-message.xml",
+        "SMEV_OUTGOING_MESSAGE", "smev3/frontend-service-template/src/test/resources/dlm/", "dlm-smev-outgoing-message.xml"
+    ]
+    
+    def dataLifeModelMap = [:]
+    for (int i = 0; i < data.size(); i += 3) {
+        dataLifeModelMap[data[i]] = [path: data[i + 1], file: data[i + 2]]
+    }
+    
+    return dataLifeModelMap
+}
+
+def getDRLfromGitlab(String apiUrl, String privateToken, String projectId, String ref, String filePath, String destinationPath) {
+    CloseableHttpClient httpClient = HttpClientBuilder.create().build();
+
+    try {
+       
+        def encodedFilePath = URLEncoder.encode(filePath, "UTF-8");
+		def fileUrl = "${apiUrl}/projects/${projectId}/repository/files/${encodedFilePath}/raw?ref=rnip-${ref}";
+        def httpGet = new HttpGet(fileUrl);
+        httpGet.setHeader(HttpHeaders.AUTHORIZATION, "Bearer ${privateToken}");
+
+        def response = httpClient.execute(httpGet);
+        def statusCode = response.getStatusLine().getStatusCode();
+        def entity = response.getEntity();
+
+        if (statusCode == 200) {
+            if (entity != null) {
+				InputStream inputStream = entity.getContent();
+				FileOutputStream outputStream = new FileOutputStream("${env.WORKSPACE}/${destinationPath}");
+				try {
+					byte[] buffer = new byte[0x1000];
+					int bytesRead;
+					while ((bytesRead = inputStream.read(buffer)) != -1) {
+						outputStream.write(buffer, 0, bytesRead);
+					}
+				} finally {
+					outputStream.close();
+					inputStream.close();
+				}
+			}
+            println("GITLAB HTTP OK! ${statusCode}");
+        } else {
+            println("GITLAB HTTP ERR: ${statusCode}");
+            throw new Exception("The GITLAB API didn't return HTTP 200 OK on Pipeline Request");
+        }	
+    } finally {
+        httpClient.close();
+    }
+}
+
+//DRLInjector
+def injectDRL(String updaterServiceUrl, String drlFile, String drlID) {
+    CloseableHttpClient httpClient = HttpClientBuilder.create().build()
+    
+    try {
+        def finalUrl = "${updaterServiceUrl}update?name=${drlID}";
+        def file = new java.io.File("${env.WORKSPACE}/${drlFile}");
+        
+        def entity = MultipartEntityBuilder.create()
+            .addBinaryBody("content", file, ContentType.MULTIPART_FORM_DATA, file.getName())
+            .build();
+        
+        HttpPut httpPut = new HttpPut(finalUrl);
+        httpPut.setEntity(entity);
+        
+        def response = httpClient.execute(httpPut);
+        def statusCode = response.getStatusLine().getStatusCode();
+        
+        if (statusCode == 200) {
+            println("INJECTOR HTTP OK! ${statusCode}");
+            
+        } else {
+            println("INJECTOR HTTP ERR: ${statusCode}");
+            throw new Exception("The UPDATER SERVICE API didn't return HTTP 200 OK on Pipeline Upload Request");
+        }
+        
+    } finally {
+        httpClient.close();
+    }
+}
+
+//JBOSS Client
+def execManagementRequest(managementUrl, managementRequest, jbossUsername, jbossPassword) {
+
+    def httpClientFactory = { ->
+        HttpClients.custom().setDefaultRequestConfig(
+            RequestConfig.custom()
+                .setConnectTimeout(2000000)
+                .setSocketTimeout(2000000)
+                .setConnectionRequestTimeout(2000000)
+                .build())
+        .build()
+    }
+    
+    def executeHttpRequest = { Closure closure ->
+        closure.delegate = this
+        closure.resolveStrategy = Closure.DELEGATE_FIRST
+        closure.call()
+    }
+    def response = executeHttpRequest {
+        def httpClient = httpClientFactory();
+
+        def entity = new StringEntity(managementRequest);
+        def httpPost = new HttpPost(managementUrl);
+        httpPost.setEntity(entity);
+        httpPost.setHeader("Accept", "application/json");
+        httpPost.setHeader("Content-type", "application/json");
+      
+        def digestScheme = new DigestScheme();
+
+        def credsProvider = new BasicCredentialsProvider();
+        def credentials = new UsernamePasswordCredentials(jbossUsername, jbossPassword);
+        credsProvider.setCredentials(org.apache.http.auth.AuthScope.ANY, credentials);
+    
+        def authCache = new BasicAuthCache();
+        authCache.put(new org.apache.http.HttpHost(httpPost.getURI().getHost()), digestScheme);
+    
+        def httpClientContext = org.apache.http.client.protocol.HttpClientContext.create();
+        httpClientContext.setCredentialsProvider(credsProvider);
+        httpClientContext.setAuthCache(authCache);
+    
+        def httpResponse = httpClient.execute(httpPost, httpClientContext);
+        httpPost = null;
+    
+        def statusCode = httpResponse.getStatusLine().getStatusCode();
+
+        def responseBody = httpResponse.getEntity().getContent().getText();
+        
+        if (statusCode != 200) {
+            println("Status Code: " + statusCode);
+            println("Response Body: " + responseBody);
+            throw new Exception("The JBoss API didn't return HTTP 200 OK on Pipeline Management Request");
+        }
+        
+        def parsedResponse = null;
+        try {
+            parsedResponse = new JsonSlurperClassic().parseText(responseBody);
+        } finally {
+            EntityUtils.consumeQuietly(httpResponse.getEntity());
+            httpResponse.close(); 
+        }
+    
+        return parsedResponse;
+    }
+}
+
+def execMultipartBinaryUploadRequest(managementUrl, jbossUsername, jbossPassword, deployableFile) {
+    def httpClientFactory = { ->
+        HttpClients.custom().setDefaultRequestConfig(
+            RequestConfig.custom()
+                .setConnectTimeout(20000)
+                .setSocketTimeout(20000)
+                .setConnectionRequestTimeout(20000)
+                .build())
+        .build()
+    }
+
+    def executeHttpRequest = { Closure closure ->
+        closure.delegate = this
+        closure.resolveStrategy = Closure.DELEGATE_FIRST
+        closure.call()
+    }
+    def response = executeHttpRequest {
+        def httpClient = httpClientFactory();
+
+        file = new java.io.File("${env.WORKSPACE}/${deployableFile}");
+        
+        def entity = MultipartEntityBuilder.create()
+            .addBinaryBody("file", file, ContentType.APPLICATION_OCTET_STREAM, file.getName())
+            .build();
+            
+        def httpPost = new HttpPost(managementUrl + "/add-content");
+        httpPost.setEntity(entity);
+        
+        def digestScheme = new DigestScheme();
+    
+        def credsProvider = new BasicCredentialsProvider();
+        def credentials = new UsernamePasswordCredentials(jbossUsername, jbossPassword);
+        credsProvider.setCredentials(org.apache.http.auth.AuthScope.ANY, credentials);
+    
+        def authCache = new BasicAuthCache();
+        authCache.put(new org.apache.http.HttpHost(httpPost.getURI().getHost()), digestScheme);
+    
+        def httpClientContext = org.apache.http.client.protocol.HttpClientContext.create();
+        httpClientContext.setCredentialsProvider(credsProvider);
+        httpClientContext.setAuthCache(authCache);
+    
+        def httpResponse = httpClient.execute(httpPost, httpClientContext);
+        httpPost = null;
+    
+        def statusCode = httpResponse.getStatusLine().getStatusCode();
+
+        def responseBody = httpResponse.getEntity().getContent().getText();
+        
+        if (statusCode != 200) {
+            println("Status Code: " + statusCode);
+            println("Response Body: " + responseBody);
+            throw new Exception("The JBoss API didn't return HTTP 200 OK on Pipeline Upload Request");
+        }
+        
+        def parsedResponse = null;
+        try {
+            parsedResponse = new JsonSlurperClassic().parseText(responseBody);
+        } finally {
+            EntityUtils.consumeQuietly(httpResponse.getEntity());
+            httpResponse.close();
+        }
+    
+        return parsedResponse
+    }
+}
+
+//Nexus client
+/*
+* TODO: Rewrite on groovy with CloseableHttpClient
+*/
+def getRnipTargetBuildByVersion(String targetVersion, String nexusUsername, String nexusPassword) {
+    return cmd = """
+                curl -sSL -X GET --insecure -u '${nexusUsername}:${nexusPassword}' -G "https://nexus/service/rest/v1/search/assets" \\
+                    -d repository=rnip-maven \\
+                    -d maven.groupId=com.msr.rnip.* \\
+                    -d maven.baseVersion=${targetVersion} \\
+                    -d maven.extension=ear \\
+                    | grep -Po '"downloadUrl" : "\\K.+\\.ear(?=",)' \\
+                    | xargs -n1 wget -nv --no-check-certificate --user ${nexusUsername} --password '${nexusPassword}' -P .
+                """
+}
+
+//Helpers and cleaners
+@NonCPS
+def getBuildFileList() {
+    def names = [];
+    def baseDir = new File(env.WORKSPACE);
+    
+    baseDir.eachFileMatch FILES, ~/.*\.ear/, { names << it.name }
+
+    return names;
+}
+
+@NonCPS
+def removeRnipTargetBuildFromCurrentWorkspace() {
+    def baseDir = new File(env.WORKSPACE);
+    
+    baseDir.eachFileMatch FILES, ~/.*\.ear(\.\d+)?/, { File ear -> ear.delete() }
+}
+
+@NonCPS
+def removeDRLFromCurrentWorkspace() {
+    def baseDir = new File(env.WORKSPACE);
+    
+    baseDir.eachFileMatch FILES, ~/.*\.xml(\.\d+)?/, { File xml -> xml.delete() }
+}
+
+/**
+ * 
+ * PIPELINE SECTION
+ * 
+*/
+
+pipeline {
+    agent any
+    stages {
+        //Init
+        stage('INIT') {
+            steps {
+                echo echoLogger("INIT STAGE", ["${env.infoMessage}", "Target Version: [${params.targetBuildVersion}]", "Target Server Group: [${env.jbossServerGroupName}]"]);
+                
+                script {
+                    currentBuild.displayName = "${env.BUILD_NUMBER} " + "(${env.rnipTargetEnvironment}) " + "${params.targetBuildVersion} " + "ver: ${PIPELINE_VERSION}";
+                    if(!params.suppressTelegramNotifications) {
+                        sendTelegramMessage(buildTelegramMessage(true, "${PIPELINE_VERSION}", "INIT", "Starting pipeline for RNiP."), TELEGRAM_TOKEN, TELEGRAM_CHAT_ID);
+                    }
+                }
+            }
+        }
+        stage('RECEIVE_ARTIFACTS') {
+            steps {
+                
+                echo echoLogger("RECEIVE_ARTIFACTS STAGE", ["Receiving artifacts from Nexus..."]);
+                sh getRnipTargetBuildByVersion(params.targetBuildVersion, NEXUS_USERNAME, NEXUS_PASSWORD);
+                script {
+                    if(!params.suppressTelegramNotifications) {
+                        sendTelegramMessage(buildTelegramMessage(true, "${PIPELINE_VERSION}", "RECEIVE_ARTIFACTS", "Start receiving from Nexus."), TELEGRAM_TOKEN, TELEGRAM_CHAT_ID);
+                    }
+                }
+                
+            }
+            post {
+              always {
+                  script {
+                        def buildFileList = getBuildFileList();
+
+                        if (buildFileList.size() > 0) {
+                            println("Target Build files [${buildFileList.size()}] will be deployed: ${buildFileList.join(", ")}");
+                            if(!params.suppressTelegramNotifications) {
+                                sendTelegramMessage(buildTelegramMessage(true, "${PIPELINE_VERSION}", "RECEIVE_ARTIFACTS", "Artifacts from Nexus received and checked."), TELEGRAM_TOKEN, TELEGRAM_CHAT_ID);
+                            }
+                        } else {
+                            throwException("FAILURE", "Couldn't receive artifacts for version [${params.targetBuildVersion}].");
+                            if(!params.suppressTelegramNotifications) {
+                                sendTelegramMessage(buildTelegramMessage(false, "${PIPELINE_VERSION}", "RECEIVE_ARTIFACTS", "Couldn't get or/and check artifacts from Nexus."), TELEGRAM_TOKEN, TELEGRAM_CHAT_ID);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // STOP
+        stage('STOP_CLUSTER') {
+            steps {
+                echo echoLogger("STOP_CLUSTER STAGE", ["Stoping JBoss Cluster..."]);
+                execManagementRequest(env.jbossServerUrl, getClusterMagagementRequest(env.jbossServerGroupName, KILL_SERVERS_OPERATION), JBOSS_USERNAME, JBOSS_PASSWORD);
+                println("Nodes in [${env.jbossServerGroupName}] was stoped");
+                script {
+                    if(!params.suppressTelegramNotifications) {
+                        sendTelegramMessage(buildTelegramMessage(true, "${PIPELINE_VERSION}", "STOP_CLUSTER", "Cluster is STOPED."), TELEGRAM_TOKEN, TELEGRAM_CHAT_ID);
+                    }
+                }
+                sleep 10
+            }
+        }
+        // Get current Deployments and undeploy
+        stage('UNDEPLOY') {
+            steps {
+                script {
+                    echo echoLogger("UNDEPLOY STAGE", ["Undeploy old build by pattern..."]);
+                    def dep = execManagementRequest(env.jbossServerUrl, getCurrentDeploymentResources(env.jbossServerGroupName), JBOSS_USERNAME, JBOSS_PASSWORD);
+                    def names = dep.result.collect { k, v -> v.name }.findAll { it ==~ /(smev3.*.ear)|(cnsi.*.ear)|(catalog.*.ear)|(unifo.*.ear)/ }
+                    
+                    for (dName in names) {
+                        execManagementRequest(env.jbossServerUrl, getUndeployRequest(env.jbossServerGroupName, dName), JBOSS_USERNAME, JBOSS_PASSWORD);
+                        execManagementRequest(env.jbossServerUrl, getRemoveRequest(dName), JBOSS_USERNAME, JBOSS_PASSWORD);
+                        println("Deployment " + "["+ dName + "]" + " was undeployed from [${env.jbossServerGroupName}] and removed from cluster [${env.rnipTargetEnvironment}]");
+                    }
+                    if(!params.suppressTelegramNotifications) {
+                        sendTelegramMessage(buildTelegramMessage(true, "${PIPELINE_VERSION}", "UNDEPLOY", "Previous build successfully UNDEPLOYED."), TELEGRAM_TOKEN, TELEGRAM_CHAT_ID);
+                    }
+                }
+            }
+        }
+        // Deploy 
+        stage('DEPLOY') {
+            steps {
+                script {
+                    echo echoLogger("DEPLOY STAGE", ["Starting deploy process at [${env.rnipTargetEnvironment}]..."]);
+                    
+                    def deploymentFiles = getBuildFileList();
+                    
+                    for (dFile in deploymentFiles) {
+                        def binaryResponse = execMultipartBinaryUploadRequest(env.jbossServerUrl, JBOSS_USERNAME, JBOSS_PASSWORD, dFile);
+                        println("New deployment " + "["+ dFile + "]" + " was upload to cluster [${env.rnipTargetEnvironment}]");
+                        
+                        def hash = binaryResponse.result.BYTES_VALUE;
+                        println("New hashsum " + "["+ hash + "]" + " for deploymenmt " + "["+ dFile + "]" + " was received from cluster");
+                        
+                        execManagementRequest(env.jbossServerUrl, getGlobalyAddByHashRequest(dFile, hash), JBOSS_USERNAME, JBOSS_PASSWORD);
+                        println("New deployment " + "["+ dFile + "]" + " was added to global cluster space by hash");
+                        
+                        execManagementRequest(env.jbossServerUrl, getServerGroupAssignationRequest(env.jbossServerGroupName, dFile), JBOSS_USERNAME, JBOSS_PASSWORD);
+                        println("New deployment " + "["+ dFile + "]" + " was assigned to cluster server group [${env.jbossServerGroupName}]");
+                    }
+                    
+                    println("-------> Deployment process successfuly finished to server group [${env.jbossServerGroupName}] at cluster [${env.rnipTargetEnvironment}] on [${env.domainControllerAddress}]");
+                    if(!params.suppressTelegramNotifications) {
+                        sendTelegramMessage(buildTelegramMessage(true, "${PIPELINE_VERSION}", "DEPLOY", "Current build successfully DEPLOYED."), TELEGRAM_TOKEN, TELEGRAM_CHAT_ID); 
+                    }
+                    
+                }
+            }
+        }
+        //INJECT DRL CODE
+        stage('DRL_INJECTOR') {
+            steps {
+                echo echoLogger("DRL INJECTOR STAGE", ["${env.infoMessage}", "Target Version: [${params.targetBuildVersion}]", "Target Server Group: [${env.jbossServerGroupName}]"]);
+                
+                script {
+                    if (params.runDRLInjector) {
+                        def BPMap = getBPMap();
+                        def DLMMap = getDLMMap();
+                        //Inject BP by map
+                        BPMap.each { key, value ->
+                            println("Receiving BPID: $key, File: ${value.file}.");
+                            getDRLfromGitlab(GITLAB_URL, GITLAB_TOKEN, GITLAB_PROJECT_ID, params.targetBuildVersion, "${value.path}${value.file}", "${value.file}");
+                            injectDRL(env.bpUpdaterOCPUrl, "${value.file}", "$key");
+                        }
+                        //Inject BP by map
+                        DLMMap.each { key, value ->
+                            println("Receiving DMLID: $key, File: ${value.file}");
+                            getDRLfromGitlab(GITLAB_URL, GITLAB_TOKEN, GITLAB_PROJECT_ID, params.targetBuildVersion, "${value.path}${value.file}", "${value.file}");
+                            injectDRL(env.dlmUpdaterOCPUrl, "${value.file}", "$key");
+                        }
+                        
+                        if(!params.suppressTelegramNotifications) {
+                            sendTelegramMessage(buildTelegramMessage(true, "${PIPELINE_VERSION}", "DRL_INJECTOR", "Drools code successfully injected."), TELEGRAM_TOKEN, TELEGRAM_CHAT_ID);
+                        }
+                    } else {
+                        if(!params.suppressTelegramNotifications) {
+                            sendTelegramMessage(buildTelegramMessage(true, "${PIPELINE_VERSION}", "DRL_INJECTOR", "STAGE SKIPED!"), TELEGRAM_TOKEN, TELEGRAM_CHAT_ID);
+                        }
+                    }
+                }
+            }
+        }
+        // START
+        stage('START_CLUSTER') {
+            steps {
+                script {
+                    if (params.startWildflyClusterAfterDeploy) {
+                        echo echoLogger("START_CLUSTER STAGE", ["Starting Cluster at [${env.rnipTargetEnvironment}]..."]);
+                        execManagementRequest(env.jbossServerUrl, getClusterMagagementRequest(env.jbossServerGroupName, START_SERVERS_OPERATION), JBOSS_USERNAME, JBOSS_PASSWORD);
+                        if(!params.suppressTelegramNotifications) {
+                            sendTelegramMessage(buildTelegramMessage(true, "${PIPELINE_VERSION}", "START_CLUSTER", "Cluster STARTED. Pipeline is SUCCESS!"), TELEGRAM_TOKEN, TELEGRAM_CHAT_ID);
+                        }
+                    }
+                    echo echoLogger("START_CLUSTER STAGE", ["Starting Cluster stage at [${env.rnipTargetEnvironment}] Skipped!"]);
+                    if(!params.suppressTelegramNotifications) {
+                        sendTelegramMessage(buildTelegramMessage(true, "${PIPELINE_VERSION}", "START_CLUSTER", "Cluster startup is disabled for the current build and will be skipped. Pipeline is SUCCESS!"), TELEGRAM_TOKEN, TELEGRAM_CHAT_ID);
+                    }
+                }
+            }
+        }
+    }
+    // CLEANUP
+    post { 
+        always {
+            echo echoLogger("CLEANUP STAGE", ["Removing artifacts from current pipeline workspace..."]);
+            removeRnipTargetBuildFromCurrentWorkspace();
+            removeDRLFromCurrentWorkspace();
+            println("Cleanup success!");
+        }
+    }
+}
