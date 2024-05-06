@@ -3,6 +3,7 @@
 Full automation of the cycle of delivery of project artifacts, deployment, management of the JBoss / Wildfly cluster written in pure Groovy without any JBoss / Wildfly plugins for Jenkins.
 
 Implemented:
+ * Using JBOSS Management API.
  * Digest authorization in the JBoss Managemet API and all basic cluster management operations (start/stop/deploy/etc...).
  * Receiving artifacts from Nexus and Gitlab.
  * Binary loading of artifacts via JBoss Managemet API
