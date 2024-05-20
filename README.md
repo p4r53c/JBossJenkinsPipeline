@@ -1,5 +1,7 @@
 # WildFly/JBoss pipeline Example
 
+## This is skill showcase repository
+
 Full automation of the cycle of delivery of project artifacts, deployment, management of the JBoss / Wildfly cluster written in pure Groovy without any JBoss / Wildfly plugins for Jenkins.
 
 Implemented:
