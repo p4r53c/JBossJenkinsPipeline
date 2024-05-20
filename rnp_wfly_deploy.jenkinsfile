@@ -599,6 +599,7 @@ def removeDRLFromCurrentWorkspace() {
  * 
 */
 
+/**
 pipeline {
     agent any
     stages {
@@ -772,3 +773,4 @@ pipeline {
         }
     }
 }
+*/
